@@ -232,7 +232,7 @@ pub async fn run_local_listener(
 #[cfg(unix)]
 mod platform {
     use anyhow::{Context, Result};
-    use std::fs::{File, Metadata, OpenOptions, TryLockError};
+    use std::fs::{File, Metadata, OpenOptions};
     use std::io::ErrorKind;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
@@ -389,42 +389,54 @@ mod platform {
             })?;
             require_trusted_lock_file(&metadata, &lock_path)?;
 
-            match file.try_lock() {
-                Ok(()) => {
-                    // The directory entry must still name the locked inode.
-                    // A swap between open and lock would let a second daemon
-                    // lock the replacement and re-enter the split-ownership
-                    // race this lock exists to prevent.
-                    let current = SocketIdentity::read(&lock_path).with_context(|| {
+            // Upstream used `File::try_lock()` here, but Rust std does not
+            // implement file locking on Android (`ErrorKind::Unsupported`), so
+            // the daemon could never acquire its IPC lifecycle lock there. Use
+            // `flock(2)` directly, matching std's behaviour on other Unix
+            // targets. The lock is released when `file` is dropped.
+            {
+                use std::os::unix::io::AsRawFd;
+                let lock_rc =
+                    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if lock_rc != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == ErrorKind::WouldBlock {
+                        return Err(std::io::Error::new(
+                            ErrorKind::AddrInUse,
+                            format!(
+                                "local IPC endpoint lifecycle is already owned at {}",
+                                path.display()
+                            ),
+                        )
+                        .into());
+                    }
+                    return Err(error).with_context(|| {
                         format!(
-                            "confirming local IPC endpoint lifecycle lock {}",
+                            "locking local IPC endpoint lifecycle at {}",
                             lock_path.display()
                         )
-                    })?;
-                    if current != SocketIdentity::from_metadata(&metadata) {
-                        anyhow::bail!(
-                            "local IPC endpoint lock {} was replaced while being \
-                             acquired; refusing to share lifecycle ownership",
-                            lock_path.display()
-                        );
-                    }
-                    Ok(Self { _file: file })
+                    });
                 }
-                Err(TryLockError::WouldBlock) => Err(std::io::Error::new(
-                    ErrorKind::AddrInUse,
-                    format!(
-                        "local IPC endpoint lifecycle is already owned at {}",
-                        path.display()
-                    ),
-                )
-                .into()),
-                Err(TryLockError::Error(error)) => Err(error).with_context(|| {
-                    format!(
-                        "locking local IPC endpoint lifecycle at {}",
-                        lock_path.display()
-                    )
-                }),
             }
+
+            // The directory entry must still name the locked inode.
+            // A swap between open and lock would let a second daemon
+            // lock the replacement and re-enter the split-ownership
+            // race this lock exists to prevent.
+            let current = SocketIdentity::read(&lock_path).with_context(|| {
+                format!(
+                    "confirming local IPC endpoint lifecycle lock {}",
+                    lock_path.display()
+                )
+            })?;
+            if current != SocketIdentity::from_metadata(&metadata) {
+                anyhow::bail!(
+                    "local IPC endpoint lock {} was replaced while being \
+                     acquired; refusing to share lifecycle ownership",
+                    lock_path.display()
+                );
+            }
+            Ok(Self { _file: file })
         }
     }
 
