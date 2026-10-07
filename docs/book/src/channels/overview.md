@@ -119,10 +119,39 @@ Secrets (bot tokens, API keys, passwords) are stored encrypted; set them through
 | `mention_only` | Ignore messages that don't @-mention the bot (chat platforms) |
 | `proxy_url` | Per-channel proxy (http/https/socks5/socks5h); overrides global `[proxy]` |
 | `excluded_tools` | Tools withheld from the model when answering on this channel |
+| `scope_rules` | Per-guild/channel/user tool narrowing (Discord, Telegram) — see below |
 | `draft_update_interval_ms` | Streaming edit cadence (default 500 ms) |
 | `approval_timeout_secs` | Seconds to wait for operator approval on `always_ask` tools before auto-denying |
 
 Inbound senders are gated through [peer groups](./peer-groups.md), not a per-channel field.
+
+### Scoped permissions
+
+`scope_rules` narrows what the model may use on matching turns. A rule
+matches when every non-empty dimension contains the turn's scope ID
+(empty means any); matching rules combine fail-closed. Rules never widen
+the agent's risk-profile policy.
+
+```toml
+[[channels.discord.main.scope_rules]]
+name = "no shell outside ops"
+match_channels = ["<ops-channel-id>"]
+deny_tools = ["shell"]
+require_approval = ["cron_add"]
+max_actions_per_hour = 20
+```
+
+| Field | Effect |
+|---|---|
+| `match_guilds` / `match_channels` / `match_users` | Scope the rule (Discord IDs; Telegram uses chat/user IDs, no guilds) |
+| `allow_tools` | When any matching rule sets it, only the intersection stays visible |
+| `deny_tools` | Hidden on matching turns; wins over `allow_tools` |
+| `require_approval` | Forced to approval even when the profile auto-approves (no approval route means deny) |
+| `max_actions_per_hour` | Strictest matching value applies alongside the global budget (`0` denies) |
+
+Edit rules at `/config/channels/<type>/<alias>` in the dashboard. Cron
+jobs created from chat record their origin (channel, guild, channel, user,
+message); the task list shows it under each job ID.
 
 ## Streaming capability
 

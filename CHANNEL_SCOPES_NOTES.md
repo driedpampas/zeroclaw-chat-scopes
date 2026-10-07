@@ -111,7 +111,7 @@ Validation:
   `scope:<channel>:<guild>:<chan>:<user>` key (`-` for absent) + strictest
   max installed next to the approval/origin scopes; cli bypass.
 
-## Slice 4 — management UI (uncommitted)
+## Slice 4 — management UI (committed as 0e2140c)
 
 - `web/src/types/api.ts`: `CronOrigin` + `CronJob.origin` (type-only).
 - `web/src/pages/Cron.tsx`: one muted `user@channel` subline under the
@@ -120,3 +120,18 @@ Validation:
 - Scope editing needs no code: `scope_rules` is `HasPropKind::ObjectArray`,
   so the schema-driven Config UI (`ObjectArrayEditor` in `FieldForm.tsx`)
   renders it at `/config/channels/<type>/<alias>` automatically.
+
+## Slice 5 — docs (this commit)
+
+- `docs/book/src/channels/overview.md`: `scope_rules` table row +
+  "Scoped permissions" subsection (semantics, TOML example, field table,
+  dashboard path, cron origin note). English source only; translations
+  follow the documented workflow.
+
+Branch commits (base 32f2d56):
+- 00dac6c Slice 1a — provenance IDs
+- 3af2d1c Slice 1b — cron origin
+- ec79a83 Slice 2 — scoped tool permissions
+- 4e7a987 Slice 3a — scope-forced approval
+- 2bcd5a6 Slice 3b — scoped rate limits
+- 0e2140c Slice 4 — origin in task list
