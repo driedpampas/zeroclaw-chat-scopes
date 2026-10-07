@@ -15,16 +15,17 @@ pub use schedule::{
 };
 #[allow(unused_imports)]
 pub use store::{
-    add_agent_job, all_overdue_jobs, claim_job, clear_stale_locks, due_jobs, get_job,
-    get_job_for_agent, list_jobs, list_jobs_by_agent, list_runs, record_last_run,
-    record_last_run_with_status, record_run, release_job, remove_job, remove_job_for_agent,
-    remove_jobs_by_agent, rename_jobs_by_agent, reschedule_after_run,
-    reschedule_after_run_with_status, resolve_job_id_or_name, skip_missed_run,
-    sync_declarative_jobs, update_job, update_job_for_agent,
+    add_agent_job, add_agent_job_with_origin, add_shell_job_with_format_and_origin,
+    all_overdue_jobs, claim_job, clear_stale_locks, due_jobs, get_job, get_job_for_agent,
+    list_jobs, list_jobs_by_agent, list_runs, record_last_run, record_last_run_with_status,
+    record_run, release_job, remove_job, remove_job_for_agent, remove_jobs_by_agent,
+    rename_jobs_by_agent, reschedule_after_run, reschedule_after_run_with_status,
+    resolve_job_id_or_name, skip_missed_run, sync_declarative_jobs, update_job,
+    update_job_for_agent,
 };
 pub use types::{
-    CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
-    deserialize_maybe_stringified,
+    CronJob, CronJobPatch, CronOrigin, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
+    current_cron_origin, deserialize_maybe_stringified, scope_cron_origin,
 };
 
 /// Channel names exposed by the cron tool schemas. Actual runtime delivery is
@@ -138,9 +139,37 @@ fn add_shell_job_with_runtime_and_format(
     approved: bool,
     shell_output_format: CronShellOutputFormat,
 ) -> Result<CronJob> {
+    add_shell_job_with_runtime_format_and_origin(
+        config,
+        runtime,
+        security,
+        agent_alias,
+        name,
+        schedule,
+        command,
+        delivery,
+        approved,
+        shell_output_format,
+        crate::cron::current_cron_origin(),
+    )
+}
+
+pub(crate) fn add_shell_job_with_runtime_format_and_origin(
+    config: &Config,
+    runtime: &dyn RuntimeAdapter,
+    security: &SecurityPolicy,
+    agent_alias: &str,
+    name: Option<String>,
+    schedule: Schedule,
+    command: &str,
+    delivery: Option<DeliveryConfig>,
+    approved: bool,
+    shell_output_format: CronShellOutputFormat,
+    origin: Option<crate::cron::CronOrigin>,
+) -> Result<CronJob> {
     validate_shell_command_with_security(runtime, security, command, approved)?;
     validate_delivery_config(delivery.as_ref())?;
-    store::add_shell_job_with_format(
+    store::add_shell_job_with_format_and_origin(
         config,
         agent_alias,
         name,
@@ -148,6 +177,7 @@ fn add_shell_job_with_runtime_and_format(
         command,
         delivery,
         shell_output_format,
+        origin,
     )
 }
 

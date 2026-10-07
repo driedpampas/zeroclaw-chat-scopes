@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use zeroclaw_config::schema::CronShellOutputFormat;
 
 pub fn deserialize_maybe_stringified<T: serde::de::DeserializeOwned>(
@@ -146,6 +147,62 @@ fn default_source() -> String {
     "imperative".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CronOrigin {
+    /// Channel composite that created the job (`<type>.<alias>`,
+    /// e.g. `discord.main`). `None` for CLI/API/declarative jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Platform guild/server ID (Discord `guild_id`). `None` for DMs and
+    /// platforms without a guild concept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild_id: Option<String>,
+    /// Platform channel/conversation ID (Discord `channel_id`,
+    /// Telegram `chat_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    /// Platform user ID that created the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// Originating message ID (`discord_<id>`, `telegram_<chat>_<msg>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
+impl CronOrigin {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.channel.is_none()
+            && self.guild_id.is_none()
+            && self.channel_id.is_none()
+            && self.user_id.is_none()
+            && self.message_id.is_none()
+    }
+}
+
+tokio::task_local! {
+    static CRON_ORIGIN: Option<CronOrigin>;
+}
+
+/// Run `future` with `origin` visible to `cron_add` executed inline below.
+/// Follows the `LIVE_SOP_ACTION_QUEUE` task-local pattern in `sop/executor.rs`:
+/// per-message scope, never crosses `spawn!` boundaries, so background
+/// scheduler runs (no scope) record `None`.
+pub async fn scope_cron_origin<T>(
+    origin: Option<CronOrigin>,
+    future: impl Future<Output = T>,
+) -> T {
+    CRON_ORIGIN.scope(origin, future).await
+}
+
+/// Origin of the current chat turn, if any. `cron_add` calls this at
+/// execution time — no signature churn on the `Tool` trait, no model-supplied
+/// forgery (the model never sees this channel; it comes from the span scope).
+#[must_use]
+pub fn current_cron_origin() -> Option<CronOrigin> {
+    CRON_ORIGIN.try_with(|o| o.clone()).unwrap_or(None)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
     pub id: String,
@@ -181,6 +238,11 @@ pub struct CronJob {
     /// the config; imperative jobs read it from the stored field in the DB.
     #[serde(default)]
     pub shell_output_format: CronShellOutputFormat,
+    /// Where the job was created: channel composite + platform scope IDs +
+    /// originating message. `None` for CLI/API/declarative jobs and rows
+    /// written before the column existed. Immutable after creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<CronOrigin>,
     pub created_at: DateTime<Utc>,
     pub next_run: DateTime<Utc>,
     pub last_run: Option<DateTime<Utc>>,

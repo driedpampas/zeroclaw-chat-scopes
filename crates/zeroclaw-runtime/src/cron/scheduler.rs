@@ -1429,6 +1429,7 @@ mod tests {
             uses_memory: true,
             source: "imperative".into(),
             shell_output_format: CronShellOutputFormat::default(),
+            origin: None,
             created_at: Utc::now(),
             next_run: Utc::now(),
             last_run: None,

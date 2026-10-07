@@ -38,3 +38,28 @@ Validation:
 - `cargo test -p zeroclaw-log -p zeroclaw-api`
 - `cargo clippy -p zeroclaw-log -p zeroclaw-api -p zeroclaw-channels`
 - `cargo fmt --check`
+
+## Slice 1b — cron origin (this commit, pending)
+
+- `zeroclaw-runtime/src/cron/types.rs`: `CronOrigin{channel,guild_id,
+  channel_id,user_id,message_id}` + `CronJob.origin: Option<CronOrigin>`
+  (serde default/skip, immutable after creation). Task-local
+  `CRON_ORIGIN` + `scope_cron_origin()` / `current_cron_origin()` following
+  the `LIVE_SOP_ACTION_QUEUE` pattern — no `Tool` trait churn, no
+  model-supplied forgery.
+- `zeroclaw-runtime/src/cron/store.rs`: `origin TEXT` column (CREATE TABLE
+  + `add_column_if_missing` migration), all 5 SELECTs extended, tolerant
+  row decode (missing column → `None`), `add_*_with_origin` variants
+  (`add_shell_job_with_format_and_origin`, `add_agent_job_with_origin`);
+  old signatures delegate with `None`. `encode_origin` stores `None` for
+  empty origins.
+- `zeroclaw-runtime/src/cron/mod.rs`: re-exports + shell wrapper reads
+  `current_cron_origin()` internally.
+- `zeroclaw-runtime/src/tools/cron_add.rs`: agent path passes
+  `current_cron_origin()`; shell path inherits via wrapper.
+- `zeroclaw-runtime/src/tools/cron_common.rs`: `cron_add_output` includes
+  `origin`; `cron_job_output`/gateway `list_jobs` expose it via serde.
+- `zeroclaw-channels/src/orchestrator/mod.rs`: `process_channel_message`
+  wraps body in `scope_cron_origin(Some(origin))`; scheduler/CLI paths
+  have no scope → `None`.
+- Declarative sync jobs: `origin = None` (config-owned, not chat-created).

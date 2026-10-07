@@ -532,7 +532,7 @@ impl Tool for CronAddTool {
                     Err(error) => return Ok(schedule_error_result(error)),
                 };
 
-                cron::add_agent_job(
+                cron::add_agent_job_with_origin(
                     &self.config,
                     &self.agent_alias,
                     name,
@@ -544,6 +544,7 @@ impl Tool for CronAddTool {
                     delete_after_run,
                     allowed_tools,
                     uses_memory,
+                    cron::current_cron_origin(),
                 )
             }
         };

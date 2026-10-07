@@ -38,7 +38,8 @@ pub(crate) fn cron_add_output(job: &CronJob) -> Value {
         "timezone_source": fields.timezone_source,
         "next_run_local": fields.next_run_local,
         "enabled": job.enabled,
-        "allowed_tools": job.allowed_tools
+        "allowed_tools": job.allowed_tools,
+        "origin": job.origin
     })
 }
 

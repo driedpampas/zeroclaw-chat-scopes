@@ -1,5 +1,5 @@
 use crate::cron::{
-    CronJob, CronJobPatch, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
+    CronJob, CronJobPatch, CronOrigin, CronRun, DeliveryConfig, JobType, Schedule, SessionTarget,
     next_run_for_schedule, schedule_cron_expression, validate_delivery_config, validate_schedule,
 };
 use anyhow::{Context, Result};
@@ -70,7 +70,7 @@ pub fn add_shell_job(
     command: &str,
     delivery: Option<DeliveryConfig>,
 ) -> Result<CronJob> {
-    add_shell_job_with_format(
+    add_shell_job_with_format_and_origin(
         config,
         agent_alias,
         name,
@@ -78,10 +78,11 @@ pub fn add_shell_job(
         command,
         delivery,
         CronShellOutputFormat::default(),
+        None,
     )
 }
 
-pub fn add_shell_job_with_format(
+pub fn add_shell_job_with_format_and_origin(
     config: &Config,
     agent_alias: &str,
     name: Option<String>,
@@ -89,6 +90,7 @@ pub fn add_shell_job_with_format(
     command: &str,
     delivery: Option<DeliveryConfig>,
     shell_output_format: CronShellOutputFormat,
+    origin: Option<CronOrigin>,
 ) -> Result<CronJob> {
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
@@ -114,8 +116,9 @@ pub fn add_shell_job_with_format(
         conn.execute(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
-                enabled, delivery, delete_after_run, agent_alias, created_at, next_run, shell_output_format
-             ) VALUES (?1, ?2, ?3, ?4, 'shell', NULL, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9, ?10, ?11)",
+                enabled, delivery, delete_after_run, agent_alias, created_at, next_run, shell_output_format,
+                origin
+             ) VALUES (?1, ?2, ?3, ?4, 'shell', NULL, ?5, 'isolated', NULL, 1, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 expression,
@@ -128,6 +131,7 @@ pub fn add_shell_job_with_format(
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
                 shell_output_format_str,
+                encode_origin(origin.as_ref())?,
             ],
         )
         .context("Failed to insert cron shell job")?;
@@ -151,6 +155,37 @@ pub fn add_agent_job(
     allowed_tools: Option<Vec<String>>,
     uses_memory: bool,
 ) -> Result<CronJob> {
+    add_agent_job_with_origin(
+        config,
+        agent_alias,
+        name,
+        schedule,
+        prompt,
+        session_target,
+        model,
+        delivery,
+        delete_after_run,
+        allowed_tools,
+        uses_memory,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn add_agent_job_with_origin(
+    config: &Config,
+    agent_alias: &str,
+    name: Option<String>,
+    schedule: Schedule,
+    prompt: &str,
+    session_target: SessionTarget,
+    model: Option<String>,
+    delivery: Option<DeliveryConfig>,
+    delete_after_run: bool,
+    allowed_tools: Option<Vec<String>>,
+    uses_memory: bool,
+    origin: Option<CronOrigin>,
+) -> Result<CronJob> {
     let now = Utc::now();
     validate_schedule(&schedule, now)?;
     validate_delivery_config(delivery.as_ref())?;
@@ -169,8 +204,8 @@ pub fn add_agent_job(
             "INSERT INTO cron_jobs (
                 id, expression, command, schedule, job_type, prompt, name, session_target, model,
                 enabled, delivery, delete_after_run, allowed_tools, agent_alias, created_at, next_run,
-                uses_memory
-             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                uses_memory, origin
+             ) VALUES (?1, ?2, '', ?3, 'agent', ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 id,
                 expression,
@@ -186,6 +221,7 @@ pub fn add_agent_job(
                 now.to_rfc3339(),
                 next_run.to_rfc3339(),
                 if uses_memory { 1 } else { 0 },
+                encode_origin(origin.as_ref())?,
             ],
         )
         .context("Failed to insert cron agent job")?;
@@ -200,7 +236,7 @@ pub fn list_jobs(config: &Config) -> Result<Vec<CronJob>> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                      enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                     allowed_tools, source, uses_memory, agent_alias, shell_output_format
+                     allowed_tools, source, uses_memory, agent_alias, shell_output_format, origin
              FROM cron_jobs ORDER BY next_run ASC",
         )?;
 
@@ -238,7 +274,7 @@ fn get_job_raw(config: &Config, job_id: &str) -> Result<CronJob> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                      enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                     allowed_tools, source, uses_memory, agent_alias, shell_output_format
+                     allowed_tools, source, uses_memory, agent_alias, shell_output_format, origin
              FROM cron_jobs WHERE id = ?1",
         )?;
 
@@ -355,7 +391,7 @@ pub fn list_jobs_by_agent(config: &Config, agent_alias: &str) -> Result<Vec<Cron
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                      enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                     allowed_tools, source, uses_memory, agent_alias, shell_output_format
+                     allowed_tools, source, uses_memory, agent_alias, shell_output_format, origin
              FROM cron_jobs WHERE agent_alias = ?1 ORDER BY next_run ASC",
         )?;
         let rows = stmt.query_map(params![agent_alias], map_cron_job_row)?;
@@ -411,7 +447,7 @@ pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                      enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                     allowed_tools, source, uses_memory, agent_alias, shell_output_format
+                     allowed_tools, source, uses_memory, agent_alias, shell_output_format, origin
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1 AND locked_at IS NULL
              ORDER BY next_run ASC",
@@ -462,7 +498,7 @@ pub fn all_overdue_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJ
         let mut stmt = conn.prepare(
             "SELECT id, expression, command, schedule, job_type, prompt, name, session_target, model,
                      enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-                     allowed_tools, source, uses_memory, agent_alias, shell_output_format
+                     allowed_tools, source, uses_memory, agent_alias, shell_output_format, origin
              FROM cron_jobs
              WHERE enabled = 1 AND next_run <= ?1 AND locked_at IS NULL
              ORDER BY next_run ASC",
@@ -1127,6 +1163,11 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         let raw: Option<String> = row.get(21)?;
         decode_shell_output_format(raw.as_deref()).map_err(sql_conversion_error)?
     };
+    // Column 22 (`origin`) postdates existing rows: `initialize_schema` migrates
+    // live DBs, but be tolerant here so a SELECT that predates the column
+    // (or a legacy test fixture) decodes as unattributed rather than failing.
+    let origin_raw: Option<String> = row.get(22).unwrap_or(None);
+    let origin = decode_origin(origin_raw.as_deref()).map_err(sql_conversion_error)?;
 
     Ok(CronJob {
         id: row.get(0)?,
@@ -1147,6 +1188,7 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
         source: source.unwrap_or_else(|| "imperative".to_string()),
         uses_memory: uses_memory != Some(0),
         shell_output_format,
+        origin,
         created_at: parse_rfc3339(&created_at_raw).map_err(sql_conversion_error)?,
         next_run: parse_rfc3339(&next_run_raw).map_err(sql_conversion_error)?,
         last_run: match last_run_raw {
@@ -1245,6 +1287,28 @@ fn decode_allowed_tools(raw: Option<&str>) -> Result<Option<Vec<String>>> {
             return serde_json::from_str(trimmed)
                 .map(Some)
                 .with_context(|| format!("Failed to parse cron allowed_tools JSON: {trimmed}"));
+        }
+    }
+    Ok(None)
+}
+
+fn encode_origin(origin: Option<&CronOrigin>) -> Result<Option<String>> {
+    match origin {
+        None => Ok(None),
+        Some(o) if o.is_empty() => Ok(None),
+        Some(o) => serde_json::to_string(o)
+            .map(Some)
+            .context("Failed to serialize cron origin"),
+    }
+}
+
+fn decode_origin(raw: Option<&str>) -> Result<Option<CronOrigin>> {
+    if let Some(raw) = raw {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return serde_json::from_str(trimmed)
+                .map(Some)
+                .with_context(|| format!("Failed to parse cron origin JSON: {trimmed}"));
         }
     }
     Ok(None)
@@ -1742,7 +1806,8 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             next_run         TEXT NOT NULL,
             last_run         TEXT,
             last_status      TEXT,
-            last_output      TEXT
+            last_output      TEXT,
+            origin           TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run ON cron_jobs(next_run);
 
@@ -1788,6 +1853,9 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
         "shell_output_format",
         "TEXT NOT NULL DEFAULT 'wrapped'",
     )?;
+    // Provenance: where/who created the job. Nullable JSON (`CronOrigin`);
+    // `None` = CLI/API/declarative or pre-migration row.
+    add_column_if_missing(conn, "origin", "TEXT")?;
 
     Ok(())
 }
@@ -2583,6 +2651,50 @@ mod tests {
 
         let stored = get_job(&config, &job.id).unwrap();
         assert_eq!(stored.allowed_tools, job.allowed_tools);
+    }
+
+    #[test]
+    fn add_agent_job_with_origin_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+
+        let origin = crate::cron::CronOrigin {
+            channel: Some("discord.main".into()),
+            guild_id: Some("g1".into()),
+            channel_id: Some("c1".into()),
+            user_id: Some("u1".into()),
+            message_id: Some("discord_m1".into()),
+        };
+        let job = add_agent_job_with_origin(
+            &config,
+            "default",
+            Some("scoped".into()),
+            Schedule::Every { every_ms: 60_000 },
+            "do work",
+            SessionTarget::Isolated,
+            None,
+            None,
+            false,
+            None,
+            true,
+            Some(origin.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(job.origin, Some(origin.clone()));
+        let stored = get_job(&config, &job.id).unwrap();
+        assert_eq!(stored.origin, Some(origin));
+        // Origin survives unrelated patches (immutable after creation).
+        let updated = update_job(
+            &config,
+            &job.id,
+            CronJobPatch {
+                name: Some("renamed".into()),
+                ..CronJobPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.origin, stored.origin);
     }
 
     #[test]
@@ -3684,6 +3796,7 @@ schedule = { kind = "every", every_ms = 300000 }
             uses_memory: false,
             source: "imperative".to_string(),
             shell_output_format: CronShellOutputFormat::default(),
+            origin: None,
             created_at: now,
             next_run: next_run_for_schedule(schedule, now).unwrap_or(now),
             last_run: None,
