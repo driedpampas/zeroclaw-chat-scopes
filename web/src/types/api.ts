@@ -88,6 +88,14 @@ export type CronSchedule =
   | { kind: "at"; at: string }
   | { kind: "every"; every_ms: number };
 
+export interface CronOrigin {
+  channel?: string | null;
+  guild_id?: string | null;
+  channel_id?: string | null;
+  user_id?: string | null;
+  message_id?: string | null;
+}
+
 export interface CronJob {
   id: string;
   name: string | null;
@@ -105,6 +113,7 @@ export interface CronJob {
   allowed_tools: string[] | null;
   source: string | null;
   agent_alias: string;
+  origin?: CronOrigin | null;
   created_at: string;
   next_run: string;
   last_run: string | null;

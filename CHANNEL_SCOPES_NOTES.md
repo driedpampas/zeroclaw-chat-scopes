@@ -110,3 +110,13 @@ Validation:
 - `zeroclaw-channels/src/orchestrator/mod.rs`: per-message
   `scope:<channel>:<guild>:<chan>:<user>` key (`-` for absent) + strictest
   max installed next to the approval/origin scopes; cli bypass.
+
+## Slice 4 — management UI (uncommitted)
+
+- `web/src/types/api.ts`: `CronOrigin` + `CronJob.origin` (type-only).
+- `web/src/pages/Cron.tsx`: one muted `user@channel` subline under the
+  job ID (tooltip: created-at + guild/channel/message). No new columns,
+  no new i18n strings, no extra copy.
+- Scope editing needs no code: `scope_rules` is `HasPropKind::ObjectArray`,
+  so the schema-driven Config UI (`ObjectArrayEditor` in `FieldForm.tsx`)
+  renders it at `/config/channels/<type>/<alias>` automatically.

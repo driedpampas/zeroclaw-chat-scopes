@@ -64,6 +64,25 @@ function scheduleTimezone(job: CronJob): string | null {
   return null;
 }
 
+// Compact provenance for chat-created jobs: `user@channel`, full scope in
+// the tooltip. Null when the job predates origin tracking or came from
+// CLI/API/config. No new columns, no extra copy — one muted line.
+function originLine(job: CronJob): { text: string; title: string } | null {
+  const o = job.origin;
+  if (!o) return null;
+  const channel = o.channel?.trim() || null;
+  const user = o.user_id?.trim() || null;
+  if (!channel && !user && !o.guild_id && !o.channel_id) return null;
+  const text = user && channel ? `${user}@${channel}` : (channel ?? user ?? '');
+  const detail = [
+    job.created_at ? `created ${formatDate(job.created_at)}` : null,
+    o.guild_id ? `guild ${o.guild_id}` : null,
+    o.channel_id ? `channel ${o.channel_id}` : null,
+    o.message_id ? `msg ${o.message_id}` : null,
+  ].filter(Boolean).join(' · ');
+  return { text, title: detail || text };
+}
+
 function describeCronSettingsError(err: unknown) {
   if (err instanceof ApiError) {
     return {
@@ -1039,6 +1058,17 @@ export default function Cron() {
                         >
                           {job.id}
                         </span>
+                        {(() => {
+                          const origin = originLine(job);
+                          return origin ? (
+                            <span
+                              className="min-w-0 max-w-full truncate font-mono text-xs text-pc-text-faint"
+                              title={origin.title}
+                            >
+                              {origin.text}
+                            </span>
+                          ) : null;
+                        })()}
                         <Button
                           variant="ghost"
                           size="sm"
