@@ -5303,6 +5303,9 @@ async fn process_channel_message(
     let agent_alias = Arc::clone(&ctx.agent_alias);
     let sender = msg.sender.clone();
     let message_id = msg.id.clone();
+    let guild_id = msg.guild_id.clone().unwrap_or_default();
+    let scope_channel_id = msg.channel_id.clone().unwrap_or_default();
+    let scope_user_id = msg.user_id.clone().unwrap_or_default();
     let composite_for_body = channel_composite.clone();
     zeroclaw_log::scope!(
         category: "channel",
@@ -5310,6 +5313,9 @@ async fn process_channel_message(
         channel: channel_composite.as_str(),
         sender: sender.as_str(),
         message_id: message_id.as_str(),
+        guild_id: guild_id.as_str(),
+        channel_id: scope_channel_id.as_str(),
+        user_id: scope_user_id.as_str(),
         => async move {
             process_channel_message_body(ctx, msg, cancellation_token, composite_for_body).await;
         }

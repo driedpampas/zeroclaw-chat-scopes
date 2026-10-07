@@ -3327,6 +3327,20 @@ impl Channel for DiscordChannel {
                             format!("discord_{message_id}")
                         },
                         sender: author_id.to_string(),
+                        guild_id: d
+                            .get("guild_id")
+                            .and_then(|g| g.as_str())
+                            .map(ToString::to_string),
+                        channel_id: if channel_id.is_empty() {
+                            None
+                        } else {
+                            Some(channel_id.clone())
+                        },
+                        user_id: if author_id.is_empty() {
+                            None
+                        } else {
+                            Some(author_id.to_string())
+                        },
                         reply_target: if channel_id.is_empty() {
                             author_id.to_string()
                         } else {

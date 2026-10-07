@@ -519,6 +519,13 @@ impl ScopeSpanCollector {
         if ATTRIBUTION_FIELDS.contains(&name)
             && let Value::String(s) = value
         {
+            // Empty-string attribution is absent attribution: optional scope
+            // IDs (`guild_id`/`channel_id`/`user_id`) ride as `""` when the
+            // platform has no such concept. Storing `""` would pollute the
+            // `zeroclaw.*` block and fake `is_fully_populated`.
+            if s.is_empty() {
+                return;
+            }
             self.attribution.set(name, s);
             return;
         }

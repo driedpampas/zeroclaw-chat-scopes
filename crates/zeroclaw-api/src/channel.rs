@@ -372,6 +372,18 @@ pub struct ChannelMessage {
     /// Inbound email References chain (parent thread); used to build the
     /// reply's References header. Empty for non-email channels.
     pub references: Vec<String>,
+    /// Platform guild/server identifier (e.g. Discord `guild_id`).
+    /// `None` for DMs and platforms without a guild concept (Telegram).
+    pub guild_id: Option<String>,
+    /// Platform channel/conversation identifier (e.g. Discord `channel_id`,
+    /// Telegram `chat_id`). Distinct from `reply_target` (routing) and
+    /// `thread_ts` (reply anchor): this is the stable scope key for
+    /// per-channel permissions and provenance.
+    pub channel_id: Option<String>,
+    /// Platform user identifier (e.g. Discord snowflake, Telegram numeric ID).
+    /// Distinct from `sender` (display identity): this is the stable scope
+    /// key for per-user permissions and provenance.
+    pub user_id: Option<String>,
 }
 
 /// Message to send through a channel
