@@ -94,3 +94,19 @@ Validation:
 - `zeroclaw-channels/src/orchestrator/mod.rs`: per-turn forced list
   computed in `process_channel_message` (cli bypass, Full inherits the
   manager's never-prompt) and nested with the cron-origin scope.
+
+## Slice 3b — scoped rate limits (uncommitted)
+
+- `zeroclaw-config/src/schema.rs`: `ChannelScopeRule.max_actions_per_hour`
+  + `rate_limit_for_turn()` (minimum of matching rules; `Some(0)` denies).
+- `zeroclaw-config/src/policy.rs` (engine change, additive): task-local
+  `SCOPE_RATE_LIMIT` + `scope_rate_limit()`; `PerSenderTracker` gains
+  single-lock dual-bucket `record_current_scoped` /
+  `is_current_scoped_limited` / `reserve_current_scoped`; both buckets must
+  admit (fail-closed). `ActionReservation` generalizes from one key to
+  `keys: Vec` (commit/release all); call sites unchanged.
+  `SecurityPolicy::{record_action, is_rate_limited, reserve_action}` route
+  through the scoped variants (identical behavior when no scope installed).
+- `zeroclaw-channels/src/orchestrator/mod.rs`: per-message
+  `scope:<channel>:<guild>:<chan>:<user>` key (`-` for absent) + strictest
+  max installed next to the approval/origin scopes; cli bypass.

@@ -14927,6 +14927,12 @@ pub struct ChannelScopeRule {
     /// approval route this denies the call (fail-closed). Exact names.
     #[serde(default)]
     pub require_approval: Vec<String>,
+    /// Hourly action budget for matching turns. The strictest (minimum)
+    /// matching value applies alongside the agent's global
+    /// `max_actions_per_hour` — both must admit. `Some(0)` denies all
+    /// actions in scope. `None` (default) = global budget only.
+    #[serde(default)]
+    pub max_actions_per_hour: Option<u32>,
 }
 
 impl ChannelScopeRule {
@@ -15023,6 +15029,24 @@ impl ChannelScopeRule {
             }
         }
         forced
+    }
+
+    /// Hourly action budget for this turn: the minimum `max_actions_per_hour`
+    /// across matching rules. `None` when no matching rule sets one (global
+    /// budget only). Buckets are keyed per scope identity by the caller.
+    #[must_use]
+    pub fn rate_limit_for_turn(
+        rules: &[ChannelScopeRule],
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        user_id: Option<&str>,
+        sender: Option<&str>,
+    ) -> Option<u32> {
+        rules
+            .iter()
+            .filter(|r| r.matches(guild_id, channel_id, user_id, sender))
+            .filter_map(|r| r.max_actions_per_hour)
+            .min()
     }
 }
 
@@ -25317,6 +25341,7 @@ mod tests {
             allow_tools: allow.map(|a| a.iter().map(ToString::to_string).collect()),
             deny_tools: deny.iter().map(ToString::to_string).collect(),
             require_approval: Vec::new(),
+            max_actions_per_hour: None,
         }
     }
 
@@ -25398,6 +25423,37 @@ mod tests {
         let forced =
             ChannelScopeRule::required_approval_for_turn(&rules, Some("g2"), Some("c"), None, None);
         assert_eq!(forced, ["browser".to_string(), "shell".to_string()]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn rate_limit_for_turn_takes_minimum_matching_max() {
+        let mut strict = scope_rule(&["g1"], &[], &[], None, &[]);
+        strict.max_actions_per_hour = Some(5);
+        let mut loose = scope_rule(&[], &[], &[], None, &[]);
+        loose.max_actions_per_hour = Some(20);
+        let plain = scope_rule(&[], &[], &[], None, &[]);
+        let rules = [strict, loose, plain];
+        // g1 turn: strict wins.
+        assert_eq!(
+            ChannelScopeRule::rate_limit_for_turn(&rules, Some("g1"), Some("c"), None, None),
+            Some(5)
+        );
+        // Elsewhere: loose rule only.
+        assert_eq!(
+            ChannelScopeRule::rate_limit_for_turn(&rules, Some("g2"), Some("c"), None, None),
+            Some(20)
+        );
+        // No rule sets one: global budget only.
+        assert_eq!(
+            ChannelScopeRule::rate_limit_for_turn(
+                &[scope_rule(&[], &[], &[], None, &[])],
+                Some("g"),
+                Some("c"),
+                None,
+                None
+            ),
+            None
+        );
     }
 
     // ── Nextcloud Talk: one normalized bot secret for both directions ──

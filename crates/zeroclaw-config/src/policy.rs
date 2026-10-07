@@ -169,6 +169,31 @@ pub struct PerSenderTracker {
     buckets: std::sync::Arc<parking_lot::Mutex<HashMap<String, ActionTracker>>>,
 }
 
+tokio::task_local! {
+    static SCOPE_RATE_LIMIT: Option<(String, u32)>;
+}
+
+/// Run `future` with a scoped action budget `(key, max)` in addition to the
+/// global per-sender budget. Installed per inbound message by the channel
+/// orchestrator from the strictest matching `scope_rules
+/// max_actions_per_hour`; the tool loop reads it inside `record_action` /
+/// `is_rate_limited` / `reserve_action` so no tool signature changes and
+/// concurrent turns stay isolated. Same task-local pattern as
+/// `zeroclaw_runtime::cron::scope_cron_origin`. `None` installs no budget
+/// but still shadows any outer scope so it can never leak into this turn.
+pub async fn scope_rate_limit<R>(
+    scope: Option<(String, u32)>,
+    future: impl std::future::Future<Output = R>,
+) -> R {
+    SCOPE_RATE_LIMIT.scope(scope, future).await
+}
+
+fn current_scope_limit() -> Option<(String, u32)> {
+    SCOPE_RATE_LIMIT
+        .try_with(|scope| scope.clone())
+        .unwrap_or(None)
+}
+
 impl PerSenderTracker {
     /// Bucket key used when no per-sender context is available (cron, CLI).
     pub const GLOBAL_KEY: &'static str = "__global__";
@@ -196,6 +221,51 @@ impl PerSenderTracker {
         self.record_within(&key, max)
     }
 
+    /// Bucket keys for the current turn: the global per-sender key plus the
+    /// installed scope budget, if any. Both must admit (fail-closed).
+    fn scoped_keys(&self, global_max: u32) -> Vec<(String, u32)> {
+        let mut keys = vec![(Self::current_key(), global_max)];
+        if let Some((key, max)) = current_scope_limit() {
+            keys.push((key, max));
+        }
+        keys
+    }
+
+    /// Record one action against the global and (when installed) scope
+    /// budgets atomically: either both admit and record, or neither does.
+    pub fn record_current_scoped(&self, global_max: u32) -> bool {
+        let keys = self.scoped_keys(global_max);
+        if keys.len() == 1 {
+            let (key, max) = &keys[0];
+            return self.record_within(key, *max);
+        }
+        let mut buckets = self.buckets.lock();
+        // Fast reject: no budget is consumed when any bucket is exhausted.
+        for (key, max) in &keys {
+            if *max == 0 {
+                return false;
+            }
+            let exhausted = match buckets.get(key) {
+                Some(tracker) => tracker.used_at(Instant::now()) >= *max as usize,
+                None => false,
+            };
+            if exhausted {
+                return false;
+            }
+        }
+        // Each try_record re-checks under its bucket lock; a concurrent
+        // record landing between the check above and here can leave at most
+        // one budget with a count the other rejected (no over-admission,
+        // bounded leak) — same contention posture as the single-bucket path.
+        for (key, max) in &keys {
+            let tracker = buckets.entry(key.clone()).or_default();
+            if !tracker.try_record(*max) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Record one action for `key` when a slot remains.
     /// Rejected attempts are not recorded.
     pub fn record_within(&self, key: &str, max: u32) -> bool {
@@ -211,6 +281,50 @@ impl PerSenderTracker {
     pub fn reserve_for_current(&self, max: u32) -> Option<ActionReservation> {
         let key = Self::current_key();
         self.reserve_within(key, max)
+    }
+
+    /// Reserve one slot against the global and (when installed) scope
+    /// budgets together: either every budget admits or none is held.
+    pub fn reserve_current_scoped(&self, global_max: u32) -> Option<ActionReservation> {
+        let keys = self.scoped_keys(global_max);
+        if keys.len() == 1 {
+            let (key, max) = keys.into_iter().next().expect("one scoped key");
+            return self.reserve_within(key, max);
+        }
+        if keys.iter().any(|(_, max)| *max == 0) {
+            return None;
+        }
+        let mut buckets = self.buckets.lock();
+        // Admit-check every bucket before holding any slot.
+        for (key, max) in &keys {
+            let exhausted = match buckets.get(key) {
+                Some(tracker) => tracker.used_at(Instant::now()) >= *max as usize,
+                None => false,
+            };
+            if exhausted {
+                return None;
+            }
+        }
+        let mut held: Vec<String> = Vec::with_capacity(keys.len());
+        for (key, max) in &keys {
+            let tracker = buckets.entry(key.clone()).or_default();
+            if !tracker.reserve(*max) {
+                // Lost a race after the check above: release this call's
+                // earlier holds (same contention posture as record above).
+                for held_key in held {
+                    if let Some(tracker) = buckets.get(&held_key) {
+                        let _ = tracker.release();
+                    }
+                }
+                return None;
+            }
+            held.push(key.clone());
+        }
+        Some(ActionReservation {
+            tracker: self.clone(),
+            keys: held,
+            finished: false,
+        })
     }
 
     fn reserve_within(&self, key: String, max: u32) -> Option<ActionReservation> {
@@ -234,7 +348,7 @@ impl PerSenderTracker {
         }
         Some(ActionReservation {
             tracker: self.clone(),
-            key,
+            keys: vec![key],
             finished: false,
         })
     }
@@ -262,6 +376,25 @@ impl PerSenderTracker {
         self.is_exhausted(&key, max)
     }
 
+    /// True when the global or (when installed) scope budget is exhausted.
+    pub fn is_current_scoped_limited(&self, global_max: u32) -> bool {
+        let keys = self.scoped_keys(global_max);
+        if keys.len() == 1 {
+            let (key, max) = &keys[0];
+            return self.is_exhausted(key, *max);
+        }
+        let buckets = self.buckets.lock();
+        keys.iter().any(|(key, max)| {
+            if *max == 0 {
+                return true;
+            }
+            match buckets.get(key) {
+                Some(tracker) => tracker.used_at(Instant::now()) >= *max as usize,
+                None => false,
+            }
+        })
+    }
+
     pub fn is_exhausted(&self, key: &str, max: u32) -> bool {
         self.is_exhausted_at(key, max, Instant::now())
     }
@@ -282,15 +415,17 @@ impl PerSenderTracker {
 #[must_use = "dropping the reservation releases the action slot"]
 pub struct ActionReservation {
     tracker: PerSenderTracker,
-    key: String,
+    keys: Vec<String>,
     finished: bool,
 }
 
 impl ActionReservation {
     /// Convert this in-flight slot into one committed action.
     pub fn commit(mut self) {
-        let committed = self.tracker.commit_reservation(&self.key);
-        assert!(committed, "owned action reservation must still exist");
+        for key in &self.keys {
+            let committed = self.tracker.commit_reservation(key);
+            assert!(committed, "owned action reservation must still exist");
+        }
         self.finished = true;
     }
 }
@@ -298,7 +433,9 @@ impl ActionReservation {
 impl Drop for ActionReservation {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = self.tracker.release_reservation(&self.key);
+            for key in &self.keys {
+                let _ = self.tracker.release_reservation(key);
+            }
         }
     }
 }
@@ -3381,20 +3518,25 @@ impl SecurityPolicy {
     }
 
     /// Atomically reserve one action slot for a production-wrapped invocation.
+    /// Honors the installed scope budget alongside the global one.
     pub fn reserve_action(&self) -> Option<ActionReservation> {
-        self.tracker.reserve_for_current(self.max_actions_per_hour)
+        self.tracker
+            .reserve_current_scoped(self.max_actions_per_hour)
     }
 
     /// Record an action for the current sender and check if rate-limited.
-    /// Returns `true` if allowed, `false` if budget exhausted.
+    /// Returns `true` if allowed, `false` if budget exhausted. Honors the
+    /// installed scope budget alongside the global one.
     pub fn record_action(&self) -> bool {
-        self.tracker.record_for_current(self.max_actions_per_hour)
+        self.tracker
+            .record_current_scoped(self.max_actions_per_hour)
     }
 
     /// Check if the current sender would be rate-limited without recording.
+    /// Honors the installed scope budget alongside the global one.
     pub fn is_rate_limited(&self) -> bool {
         self.tracker
-            .is_limited_for_current(self.max_actions_per_hour)
+            .is_current_scoped_limited(self.max_actions_per_hour)
     }
 
     pub fn resolve_tool_path(&self, path: &str) -> PathBuf {
@@ -5297,6 +5439,78 @@ mod tests {
         assert!(!p.is_rate_limited());
         p.record_action();
         assert!(p.is_rate_limited());
+    }
+
+    fn block_on_scope<R>(
+        scope: Option<(String, u32)>,
+        future: impl std::future::Future<Output = R>,
+    ) -> R {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(scope_rate_limit(scope, future))
+    }
+
+    #[test]
+    fn scoped_budget_rejects_while_global_allows() {
+        let p = SecurityPolicy {
+            max_actions_per_hour: 100,
+            ..SecurityPolicy::default()
+        };
+        block_on_scope(Some(("scope:test".to_string(), 2)), async {
+            assert!(p.record_action());
+            assert!(p.record_action());
+            assert!(!p.record_action(), "scope budget exhausted");
+            assert!(p.is_rate_limited());
+        });
+        // Scope ends with the future: the global budget only saw 2 of 100.
+        assert!(!p.is_rate_limited());
+        assert!(p.record_action());
+    }
+
+    #[test]
+    fn scoped_budgets_are_isolated_per_key() {
+        let p = SecurityPolicy {
+            max_actions_per_hour: 100,
+            ..SecurityPolicy::default()
+        };
+        block_on_scope(Some(("scope:a".to_string(), 1)), async {
+            assert!(p.record_action());
+            assert!(!p.record_action());
+        });
+        // A different scope key has its own budget.
+        block_on_scope(Some(("scope:b".to_string(), 1)), async {
+            assert!(p.record_action());
+        });
+    }
+
+    #[test]
+    fn scoped_zero_max_denies_everything() {
+        let p = SecurityPolicy {
+            max_actions_per_hour: 100,
+            ..SecurityPolicy::default()
+        };
+        block_on_scope(Some(("scope:muted".to_string(), 0)), async {
+            assert!(!p.record_action());
+            assert!(p.is_rate_limited());
+            assert!(p.reserve_action().is_none());
+        });
+        assert!(p.record_action(), "global budget unaffected");
+    }
+
+    #[test]
+    fn scoped_reservation_holds_both_budgets_until_commit() {
+        let p = SecurityPolicy {
+            max_actions_per_hour: 100,
+            ..SecurityPolicy::default()
+        };
+        block_on_scope(Some(("scope:r".to_string(), 1)), async {
+            let reservation = p.reserve_action().expect("first slot");
+            assert!(p.is_rate_limited(), "held slot counts as used");
+            reservation.commit();
+            assert!(!p.record_action(), "committed slot exhausts scope");
+        });
     }
 
     #[test]

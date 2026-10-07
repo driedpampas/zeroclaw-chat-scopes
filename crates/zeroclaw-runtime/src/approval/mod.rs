@@ -79,12 +79,12 @@ pub enum ApprovalRequirement {
     NotRequired,
 }
 
-/// Tools the current channel scope forces to approval, even when the risk
-/// profile would auto-approve them. Scoped per inbound message by the
-/// channel orchestrator (from matching `scope_rules require_approval`); the
-/// tool loop reads it inside `approval_requirement` so no `Tool` or
-/// `ApprovalManager` signature changes and concurrent turns stay isolated.
-/// Same task-local pattern as `crate::cron::scope_cron_origin`.
+// Tools the current channel scope forces to approval, even when the risk
+// profile would auto-approve them. Scoped per inbound message by the
+// channel orchestrator (from matching `scope_rules require_approval`); the
+// tool loop reads it inside `approval_requirement` so no `Tool` or
+// `ApprovalManager` signature changes and concurrent turns stay isolated.
+// Same task-local pattern as `crate::cron::scope_cron_origin`.
 tokio::task_local! {
     static SCOPE_FORCED_APPROVAL: Option<Vec<String>>;
 }

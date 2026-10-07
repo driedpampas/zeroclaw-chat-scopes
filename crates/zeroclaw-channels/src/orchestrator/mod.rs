@@ -5375,10 +5375,10 @@ async fn process_channel_message(
     // Tools the matching scope rules force to approval. Empty (cli/Full
     // bypass or no rule demands it) still installs the scope so a stale
     // outer scope can never leak into this turn.
+    let rules = scope_rules_for_message(ctx.prompt_config.as_ref(), &msg);
     let forced_approval = if msg.channel == "cli" {
         Vec::new()
     } else {
-        let rules = scope_rules_for_message(ctx.prompt_config.as_ref(), &msg);
         zeroclaw_config::schema::ChannelScopeRule::required_approval_for_turn(
             rules,
             msg.guild_id.as_deref(),
@@ -5387,22 +5387,48 @@ async fn process_channel_message(
             Some(sender.as_str()),
         )
     };
+    // Scoped action budget: strictest matching max, bucketed per scope
+    // identity. Absent when cli or no rule sets one (global budget only).
+    let scope_limit: Option<(String, u32)> = if msg.channel == "cli" {
+        None
+    } else {
+        zeroclaw_config::schema::ChannelScopeRule::rate_limit_for_turn(
+            rules,
+            msg.guild_id.as_deref(),
+            msg.channel_id.as_deref(),
+            msg.user_id.as_deref(),
+            Some(sender.as_str()),
+        )
+        .map(|max| {
+            let key = format!(
+                "scope:{}:{}:{}:{}",
+                channel_composite,
+                msg.guild_id.as_deref().unwrap_or("-"),
+                msg.channel_id.as_deref().unwrap_or("-"),
+                msg.user_id.as_deref().unwrap_or("-"),
+            );
+            (key, max)
+        })
+    };
     zeroclaw_runtime::approval::scope_forced_approval(
         forced_approval,
-        zeroclaw_runtime::cron::scope_cron_origin(
-            cron_origin,
-            zeroclaw_log::scope!(
-                category: "channel",
-                agent_alias: agent_alias.as_str(),
-                channel: channel_composite.as_str(),
-                sender: sender.as_str(),
-                message_id: message_id.as_str(),
-                guild_id: guild_id.as_str(),
-                channel_id: scope_channel_id.as_str(),
-                user_id: scope_user_id.as_str(),
-                => async move {
-                    process_channel_message_body(ctx, msg, cancellation_token, composite_for_body).await;
-                }
+        zeroclaw_config::policy::scope_rate_limit(
+            scope_limit,
+            zeroclaw_runtime::cron::scope_cron_origin(
+                cron_origin,
+                zeroclaw_log::scope!(
+                    category: "channel",
+                    agent_alias: agent_alias.as_str(),
+                    channel: channel_composite.as_str(),
+                    sender: sender.as_str(),
+                    message_id: message_id.as_str(),
+                    guild_id: guild_id.as_str(),
+                    channel_id: scope_channel_id.as_str(),
+                    user_id: scope_user_id.as_str(),
+                    => async move {
+                        process_channel_message_body(ctx, msg, cancellation_token, composite_for_body).await;
+                    }
+                ),
             ),
         ),
     )
