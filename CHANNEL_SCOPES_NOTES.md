@@ -80,3 +80,17 @@ Validation:
   (incl. model-switch refresh). `cli`/`Full` bypass preserved.
 - Skills surfacing inherits automatically (same `excluded_tools` predicate
   drives `refreshed_skills_system_prompt` + slash-spec filtering).
+
+## Slice 3a — scope-forced approval (uncommitted)
+
+- `zeroclaw-config/src/schema.rs`: `ChannelScopeRule.require_approval` +
+  `required_approval_for_turn()` union.
+- `zeroclaw-runtime/src/approval/mod.rs` (engine change: additive check in
+  the owning module, no signature changes): task-local
+  `SCOPE_FORCED_APPROVAL` + `scope_forced_approval()`; consulted in
+  `approval_requirement` alongside `always_ask` but below the
+  Full/ReadOnly early returns. No approval route on a channel run =
+  auto-deny (fail-closed, existing non-interactive behavior).
+- `zeroclaw-channels/src/orchestrator/mod.rs`: per-turn forced list
+  computed in `process_channel_message` (cli bypass, Full inherits the
+  manager's never-prompt) and nested with the cron-origin scope.

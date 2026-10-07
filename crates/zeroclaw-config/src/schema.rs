@@ -14922,6 +14922,11 @@ pub struct ChannelScopeRule {
     /// spelling as `excluded_tools`. Wins over `allow_tools`.
     #[serde(default)]
     pub deny_tools: Vec<String>,
+    /// Tools that require operator approval on matching turns, even when
+    /// the risk profile would auto-approve them. On channel runs with no
+    /// approval route this denies the call (fail-closed). Exact names.
+    #[serde(default)]
+    pub require_approval: Vec<String>,
 }
 
 impl ChannelScopeRule {
@@ -14994,6 +14999,30 @@ impl ChannelScopeRule {
             }
         }
         excluded
+    }
+
+    /// Tools requiring operator approval on this turn: the union of matching
+    /// `require_approval` lists. Empty when no rule matches or none demands it.
+    #[must_use]
+    pub fn required_approval_for_turn(
+        rules: &[ChannelScopeRule],
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        user_id: Option<&str>,
+        sender: Option<&str>,
+    ) -> Vec<String> {
+        let mut forced: Vec<String> = Vec::new();
+        for rule in rules
+            .iter()
+            .filter(|r| r.matches(guild_id, channel_id, user_id, sender))
+        {
+            for tool in &rule.require_approval {
+                if !forced.iter().any(|f| f == tool) {
+                    forced.push(tool.clone());
+                }
+            }
+        }
+        forced
     }
 }
 
@@ -25287,6 +25316,7 @@ mod tests {
             match_users: users.iter().map(ToString::to_string).collect(),
             allow_tools: allow.map(|a| a.iter().map(ToString::to_string).collect()),
             deny_tools: deny.iter().map(ToString::to_string).collect(),
+            require_approval: Vec::new(),
         }
     }
 
@@ -25351,6 +25381,23 @@ mod tests {
             &known,
         );
         assert_eq!(excluded, base);
+    }
+
+    #[::core::prelude::v1::test]
+    fn required_approval_for_turn_unions_matching_rules() {
+        let mut shell_rule = scope_rule(&["g1"], &[], &[], None, &[]);
+        shell_rule.require_approval = ["shell".to_string()].to_vec();
+        let mut broad_rule = scope_rule(&[], &[], &[], None, &[]);
+        broad_rule.require_approval = ["browser".to_string(), "shell".to_string()].to_vec();
+        let rules = [shell_rule, broad_rule];
+        // g1 turn: both rules match — union, deduplicated.
+        let forced =
+            ChannelScopeRule::required_approval_for_turn(&rules, Some("g1"), Some("c"), None, None);
+        assert_eq!(forced, ["shell".to_string(), "browser".to_string()]);
+        // Other guild: only the broad rule matches.
+        let forced =
+            ChannelScopeRule::required_approval_for_turn(&rules, Some("g2"), Some("c"), None, None);
+        assert_eq!(forced, ["browser".to_string(), "shell".to_string()]);
     }
 
     // ── Nextcloud Talk: one normalized bot secret for both directions ──

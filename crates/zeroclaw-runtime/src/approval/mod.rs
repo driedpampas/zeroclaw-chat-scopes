@@ -79,6 +79,34 @@ pub enum ApprovalRequirement {
     NotRequired,
 }
 
+/// Tools the current channel scope forces to approval, even when the risk
+/// profile would auto-approve them. Scoped per inbound message by the
+/// channel orchestrator (from matching `scope_rules require_approval`); the
+/// tool loop reads it inside `approval_requirement` so no `Tool` or
+/// `ApprovalManager` signature changes and concurrent turns stay isolated.
+/// Same task-local pattern as `crate::cron::scope_cron_origin`.
+tokio::task_local! {
+    static SCOPE_FORCED_APPROVAL: Option<Vec<String>>;
+}
+
+/// Run `future` with `tools` forced to approval. Empty = no forcing.
+pub async fn scope_forced_approval<T>(
+    tools: Vec<String>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    SCOPE_FORCED_APPROVAL.scope(Some(tools), future).await
+}
+
+fn scope_forces_approval(tool_name: &str) -> bool {
+    SCOPE_FORCED_APPROVAL
+        .try_with(|forced| {
+            forced
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|t| t == tool_name))
+        })
+        .unwrap_or(false)
+}
+
 // ── ApprovalManager ──────────────────────────────────────────────
 
 pub struct ApprovalManager {
@@ -185,6 +213,13 @@ impl ApprovalManager {
 
         // always_ask overrides everything.
         if self.always_ask.contains("*") || self.always_ask.contains(tool_name) {
+            return ApprovalRequirement::Prompt;
+        }
+
+        // Channel scope rules can force approval per turn. Placed with
+        // always_ask (overrides auto_approve and the session allowlist) but
+        // below the Full/ReadOnly early returns above: Full never prompts.
+        if scope_forces_approval(tool_name) {
             return ApprovalRequirement::Prompt;
         }
 
@@ -451,6 +486,33 @@ mod tests {
             level: AutonomyLevel::Full,
             ..RiskProfileConfig::default()
         }
+    }
+
+    // ── Scope-forced approval ────────────────────────────────
+
+    #[tokio::test]
+    async fn scope_forced_approval_overrides_auto_approve_but_not_full() {
+        let supervised = ApprovalManager::for_non_interactive(&supervised_config());
+        // Baseline: file_read auto-approves with no scope installed.
+        assert!(!supervised.needs_approval("file_read"));
+
+        // Scope forcing file_read prompts even though the profile allows it.
+        scope_forced_approval(vec!["file_read".into()], async {
+            assert!(supervised.needs_approval("file_read"));
+            // Unforced tools are unaffected.
+            assert!(!supervised.needs_approval("memory_recall"));
+        })
+        .await;
+
+        // Scope ends with the future: no leak into the outer context.
+        assert!(!supervised.needs_approval("file_read"));
+
+        // Full autonomy never prompts, even when forced.
+        let full = ApprovalManager::for_non_interactive(&full_config());
+        scope_forced_approval(vec!["file_read".into()], async {
+            assert!(!full.needs_approval("file_read"));
+        })
+        .await;
     }
 
     // ── CLI prompt input ────────────────────────────────────

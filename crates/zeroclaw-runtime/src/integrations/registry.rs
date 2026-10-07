@@ -196,6 +196,7 @@ mod tests {
                 proxy_url: None,
                 approval_timeout_secs: 120,
                 excluded_tools: vec![],
+                scope_rules: vec![],
                 reply_min_interval_secs: 0,
                 reply_queue_depth_max: 0,
                 debounce_ms: None,
