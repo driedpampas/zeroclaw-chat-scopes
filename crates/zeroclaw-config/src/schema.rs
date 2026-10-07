@@ -14888,6 +14888,115 @@ fn default_matrix_message_max_bytes() -> usize {
     48_000
 }
 
+/// One scoped permission rule under `[channels.<type>.<alias>]`
+/// (`scope_rules = [...]` / `[[...scope_rules]]`).
+///
+/// A rule matches a turn when every non-empty dimension contains the turn's
+/// scope ID (empty = any). All matching rules combine fail-closed:
+/// `deny_tools` union wins over `allow_tools` intersection. Rules never
+/// widen the agent's risk-profile policy — they only narrow what the model
+/// sees and may call on this channel scope.
+#[derive(Debug, Clone, Serialize, Deserialize, Configurable, Default)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "channel_scope_rule"]
+pub struct ChannelScopeRule {
+    /// Human label shown in the dashboard Scopes tab. Optional.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Guild/server IDs this rule applies to. Empty = any guild (and DMs).
+    #[serde(default)]
+    pub match_guilds: Vec<String>,
+    /// Channel/conversation IDs this rule applies to (Discord `channel_id`,
+    /// Telegram `chat_id`). Empty = any channel.
+    #[serde(default)]
+    pub match_channels: Vec<String>,
+    /// User IDs this rule applies to. Empty = any user. Matched against
+    /// both the stable `user_id` and the display `sender` identity.
+    #[serde(default)]
+    pub match_users: Vec<String>,
+    /// When any matching rule sets this, only the intersection of those
+    /// lists stays visible. `None` (or no matching rule sets it) = inherit.
+    #[serde(default)]
+    pub allow_tools: Option<Vec<String>>,
+    /// Tools hidden from the model on matching turns. Exact names, same
+    /// spelling as `excluded_tools`. Wins over `allow_tools`.
+    #[serde(default)]
+    pub deny_tools: Vec<String>,
+}
+
+impl ChannelScopeRule {
+    fn dim_matches(list: &[String], value: Option<&str>, extra: Option<&str>) -> bool {
+        if list.is_empty() {
+            return true;
+        }
+        list.iter()
+            .any(|entry| value.is_some_and(|v| v == entry) || extra.is_some_and(|v| v == entry))
+    }
+
+    /// True when this rule applies to a turn with the given scope IDs.
+    /// `sender` is the display identity fallback for `match_users` when a
+    /// turn predates stable `user_id` capture.
+    #[must_use]
+    pub fn matches(
+        &self,
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        user_id: Option<&str>,
+        sender: Option<&str>,
+    ) -> bool {
+        Self::dim_matches(&self.match_guilds, guild_id, None)
+            && Self::dim_matches(&self.match_channels, channel_id, None)
+            && Self::dim_matches(&self.match_users, user_id, sender)
+    }
+
+    /// Excluded tools for a turn: `base` plus the union of matching
+    /// `deny_tools`, plus (when any matching rule sets `allow_tools`) every
+    /// `known_tools` entry outside the allow-intersection. Deny wins.
+    /// `known_tools` is the registry's tool-name universe for this turn;
+    /// unknown names in `allow_tools` are ignored (fail-closed stays exact).
+    #[must_use]
+    pub fn excluded_for_turn(
+        rules: &[ChannelScopeRule],
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        user_id: Option<&str>,
+        sender: Option<&str>,
+        base: &[String],
+        known_tools: &[String],
+    ) -> Vec<String> {
+        let matching: Vec<&ChannelScopeRule> = rules
+            .iter()
+            .filter(|r| r.matches(guild_id, channel_id, user_id, sender))
+            .collect();
+        let mut excluded: Vec<String> = base.to_vec();
+        let mut allow: Option<Vec<String>> = None;
+        for rule in &matching {
+            for denied in &rule.deny_tools {
+                if !excluded.iter().any(|e| e == denied) {
+                    excluded.push(denied.clone());
+                }
+            }
+            if let Some(rule_allow) = rule.allow_tools.as_ref() {
+                allow = Some(match allow {
+                    None => rule_allow.clone(),
+                    Some(current) => current
+                        .into_iter()
+                        .filter(|t| rule_allow.iter().any(|a| a == t))
+                        .collect(),
+                });
+            }
+        }
+        if let Some(allow) = allow {
+            for tool in known_tools {
+                if !allow.iter().any(|a| a == tool) && !excluded.iter().any(|e| e == tool) {
+                    excluded.push(tool.clone());
+                }
+            }
+        }
+        excluded
+    }
+}
+
 /// Telegram bot channel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -14963,6 +15072,12 @@ pub struct TelegramConfig {
     #[tab(Behavior)]
     #[serde(default)]
     pub excluded_tools: Vec<String>,
+    /// Scoped permission rules narrowing tool visibility per guild, channel,
+    /// or user. Evaluated per turn; see [`ChannelScopeRule`]. Empty = no
+    /// per-scope narrowing beyond `excluded_tools`.
+    #[tab(Behavior)]
+    #[serde(default)]
+    pub scope_rules: Vec<ChannelScopeRule>,
     /// Per-(channel, recipient) outbound pacing floor in seconds.
     /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
     #[serde(default)]
@@ -14990,6 +15105,7 @@ impl Default for TelegramConfig {
             proxy_url: None,
             approval_timeout_secs: default_telegram_approval_timeout_secs(),
             excluded_tools: Vec::new(),
+            scope_rules: Vec::new(),
             reply_min_interval_secs: 0,
             reply_queue_depth_max: 0,
             debounce_ms: None,
@@ -15175,6 +15291,12 @@ pub struct DiscordConfig {
     #[tab(Behavior)]
     #[serde(default)]
     pub excluded_tools: Vec<String>,
+    /// Scoped permission rules narrowing tool visibility per guild, channel,
+    /// or user. Evaluated per turn; see [`ChannelScopeRule`]. Empty = no
+    /// per-scope narrowing beyond `excluded_tools`.
+    #[tab(Behavior)]
+    #[serde(default)]
+    pub scope_rules: Vec<ChannelScopeRule>,
     /// Per-(channel, recipient) outbound pacing floor in seconds.
     /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
     #[serde(default)]
@@ -25149,6 +25271,88 @@ impl HasPropKind for serde_json::Value {
 #[cfg(test)]
 mod tests {
 
+    // ── ChannelScopeRule: per-guild/channel/user tool narrowing ──
+
+    fn scope_rule(
+        guilds: &[&str],
+        channels: &[&str],
+        users: &[&str],
+        allow: Option<&[&str]>,
+        deny: &[&str],
+    ) -> ChannelScopeRule {
+        ChannelScopeRule {
+            name: None,
+            match_guilds: guilds.iter().map(ToString::to_string).collect(),
+            match_channels: channels.iter().map(ToString::to_string).collect(),
+            match_users: users.iter().map(ToString::to_string).collect(),
+            allow_tools: allow.map(|a| a.iter().map(ToString::to_string).collect()),
+            deny_tools: deny.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn scope_rule_empty_dimensions_match_anything() {
+        let rule = scope_rule(&[], &[], &[], None, &[]);
+        assert!(rule.matches(Some("g"), Some("c"), Some("u"), Some("s")));
+        assert!(rule.matches(None, None, None, None));
+    }
+
+    #[::core::prelude::v1::test]
+    fn scope_rule_dimensions_are_conjunctive() {
+        let rule = scope_rule(&["g1"], &["c1"], &[], None, &[]);
+        assert!(rule.matches(Some("g1"), Some("c1"), Some("u"), Some("s")));
+        assert!(!rule.matches(Some("g2"), Some("c1"), Some("u"), Some("s")));
+        assert!(!rule.matches(Some("g1"), Some("c2"), Some("u"), Some("s")));
+        // Scoped rule never matches an unattributed (None) dimension it names.
+        assert!(!rule.matches(None, Some("c1"), Some("u"), Some("s")));
+    }
+
+    #[::core::prelude::v1::test]
+    fn scope_rule_users_match_stable_id_or_display_sender() {
+        let rule = scope_rule(&[], &[], &["u1"], None, &[]);
+        assert!(rule.matches(None, None, Some("u1"), Some("someone")));
+        assert!(rule.matches(None, None, None, Some("u1")));
+        assert!(!rule.matches(None, None, Some("u2"), Some("someone")));
+    }
+
+    #[::core::prelude::v1::test]
+    fn excluded_for_turn_unions_denies_and_intersects_allows() {
+        let known = [
+            "shell".to_string(),
+            "browser".to_string(),
+            "cron_add".to_string(),
+        ];
+        let base = ["shell".to_string()];
+        let rules = [
+            scope_rule(&["g1"], &[], &[], Some(&["browser", "cron_add"]), &[]),
+            scope_rule(&[], &["c9"], &[], None, &["browser"]),
+        ];
+        // Turn in g1/c9: allow narrows to browser+cron_add, deny removes browser.
+        let excluded = ChannelScopeRule::excluded_for_turn(
+            &rules,
+            Some("g1"),
+            Some("c9"),
+            None,
+            None,
+            &base,
+            &known,
+        );
+        assert!(excluded.contains(&"shell".to_string()));
+        assert!(excluded.contains(&"browser".to_string()));
+        assert!(!excluded.contains(&"cron_add".to_string()));
+        // Turn elsewhere: only base exclusion applies.
+        let excluded = ChannelScopeRule::excluded_for_turn(
+            &rules,
+            Some("g2"),
+            Some("c2"),
+            None,
+            None,
+            &base,
+            &known,
+        );
+        assert_eq!(excluded, base);
+    }
+
     // ── Nextcloud Talk: one normalized bot secret for both directions ──
     //
     // Nextcloud installs ONE secret per bot and uses it to verify inbound webhook
@@ -28275,6 +28479,7 @@ auto_save = true
                         proxy_url: None,
                         approval_timeout_secs: default_telegram_approval_timeout_secs(),
                         excluded_tools: vec![],
+                        scope_rules: vec![],
                         reply_min_interval_secs: 0,
                         reply_queue_depth_max: 0,
                     },
@@ -29809,6 +30014,7 @@ default_temperature = 0.7
             proxy_url: None,
             approval_timeout_secs: 120,
             excluded_tools: vec![],
+            scope_rules: vec![],
             reply_min_interval_secs: 0,
             reply_queue_depth_max: 0,
             debounce_ms: None,
@@ -29866,6 +30072,7 @@ stream_mode = "single_message"
             reaction_notifications: DiscordReactionScope::Off,
             approval_timeout_secs: 300,
             excluded_tools: vec![],
+            scope_rules: vec![],
             reply_min_interval_secs: 0,
             reply_queue_depth_max: 0,
         };
@@ -29897,6 +30104,7 @@ stream_mode = "single_message"
             reaction_notifications: DiscordReactionScope::Off,
             approval_timeout_secs: 300,
             excluded_tools: vec![],
+            scope_rules: vec![],
             reply_min_interval_secs: 0,
             reply_queue_depth_max: 0,
         };
@@ -35244,6 +35452,7 @@ high_entropy_tokens = false
                 proxy_url: None,
                 approval_timeout_secs: default_telegram_approval_timeout_secs(),
                 excluded_tools: vec![],
+                scope_rules: vec![],
                 reply_min_interval_secs: 0,
                 reply_queue_depth_max: 0,
                 debounce_ms: None,

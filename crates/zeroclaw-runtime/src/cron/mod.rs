@@ -154,6 +154,7 @@ fn add_shell_job_with_runtime_and_format(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_shell_job_with_runtime_format_and_origin(
     config: &Config,
     runtime: &dyn RuntimeAdapter,

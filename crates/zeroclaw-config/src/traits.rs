@@ -237,6 +237,9 @@ impl HasPropKind for crate::schema::DelegateExecutionMode {
 impl HasPropKind for Vec<crate::schema::DelegateTargetConfig> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 }
+impl HasPropKind for Vec<crate::schema::ChannelScopeRule> {
+    const PROP_KIND: PropKind = PropKind::ObjectArray;
+}
 impl HasPropKind for Vec<crate::schema::NevisRoleMappingConfig> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 }

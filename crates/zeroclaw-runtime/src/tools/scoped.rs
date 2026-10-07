@@ -50,6 +50,14 @@ impl ScopedToolRegistry {
         self.0
     }
 
+    /// Names of every tool in the sealed registry. Read-only projection for
+    /// per-turn scope narrowing (channel `scope_rules` allow-lists exclude
+    /// everything outside the allow set): the registry stays sealed, this
+    /// only names its contents.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.0.iter().map(|tool| tool.name().to_string()).collect()
+    }
+
     /// Narrow an ALREADY-sealed registry in place. A passthrough to
     /// [`Vec::retain`] on the private inner vector. This is a mutator on an
     /// existing sealed registry (it removes tools, never adds), so it cannot

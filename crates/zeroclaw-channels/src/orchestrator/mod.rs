@@ -2265,6 +2265,58 @@ fn channel_tool_available_for_turn(
         && !excluded_tools.iter().any(|excluded| excluded == tool_name)
 }
 
+/// Scope rules configured for a channel alias. Empty when the channel type
+/// has no `scope_rules` concept or the alias sets none — the caller then
+/// falls back to the alias-wide `excluded_tools` base unchanged.
+fn scope_rules_for_message<'a>(
+    config: &'a zeroclaw_config::schema::Config,
+    msg: &'a zeroclaw_api::channel::ChannelMessage,
+) -> &'a [zeroclaw_config::schema::ChannelScopeRule] {
+    match msg.channel.as_str() {
+        "discord" => msg
+            .channel_alias
+            .as_deref()
+            .and_then(|alias| config.channels.discord.get(alias))
+            .map(|c| c.scope_rules.as_slice())
+            .unwrap_or(&[]),
+        "telegram" => msg
+            .channel_alias
+            .as_deref()
+            .and_then(|alias| config.channels.telegram.get(alias))
+            .map(|c| c.scope_rules.as_slice())
+            .unwrap_or(&[]),
+        _ => &[],
+    }
+}
+
+/// Per-turn excluded tools: the alias-wide base plus matching
+/// `scope_rules` (deny-union, allow-intersection, deny wins). The single
+/// source both the prompt path and the tool-loop path below must use —
+/// computing it twice from two inline expressions would let them drift.
+fn scoped_excluded_tools_for_turn(
+    ctx: &ChannelRuntimeContext,
+    msg: &zeroclaw_api::channel::ChannelMessage,
+) -> Vec<String> {
+    if msg.channel == "cli" || ctx.autonomy_level == AutonomyLevel::Full {
+        return Vec::new();
+    }
+    let base: &[String] = ctx.non_cli_excluded_tools.as_ref();
+    let rules = scope_rules_for_message(ctx.prompt_config.as_ref(), msg);
+    if rules.is_empty() {
+        return base.to_vec();
+    }
+    let known = ctx.tools_registry.tool_names();
+    zeroclaw_config::schema::ChannelScopeRule::excluded_for_turn(
+        rules,
+        msg.guild_id.as_deref(),
+        msg.channel_id.as_deref(),
+        msg.user_id.as_deref(),
+        Some(msg.sender.as_str()),
+        base,
+        &known,
+    )
+}
+
 fn text_tool_protocol_advertised(system_prompt: &str) -> bool {
     const PROTOCOL_HEADER: &str = "## Tool Use Protocol\n\n";
     const TOOLS_HEADER: &str = "### Available Tools\n\n";
@@ -6574,18 +6626,13 @@ async fn process_channel_message_body(
         memory_sessions.push(Some(history_key.clone()));
     }
 
-    let per_turn_excluded_tools: &[String] =
-        if msg.channel == "cli" || ctx.autonomy_level == AutonomyLevel::Full {
-            &[]
-        } else {
-            ctx.non_cli_excluded_tools.as_ref()
-        };
+    let per_turn_excluded_tools: Vec<String> = scoped_excluded_tools_for_turn(ctx.as_ref(), &msg);
     let per_turn_native_tool_specs_present =
         ::zeroclaw_runtime::agent::loop_::native_tool_specs_present_for_turn(
             active_model_provider.as_ref(),
             route.model.as_str(),
             ctx.tools_registry.as_ref(),
-            per_turn_excluded_tools,
+            per_turn_excluded_tools.as_slice(),
             ctx.activated_tools.as_ref(),
         )
         .unwrap_or(false);
@@ -6602,7 +6649,7 @@ async fn process_channel_message_body(
         ctx.system_prompt.as_str(),
         !had_prior_history || route_differs_from_startup,
         callable_protocol_exposed,
-        per_turn_excluded_tools,
+        per_turn_excluded_tools.as_slice(),
     );
     let mut system_prompt = build_channel_system_prompt_for_message_with_signal(
         &base_system_prompt,
@@ -7148,12 +7195,7 @@ async fn process_channel_message_body(
                 .clone()
                 .or_else(|| msg.thread_ts.clone())
                 .or_else(|| Some(msg.id.clone()));
-            let excluded_tools: &[String] =
-                if msg.channel == "cli" || ctx.autonomy_level == AutonomyLevel::Full {
-                    &[]
-                } else {
-                    ctx.non_cli_excluded_tools.as_ref()
-                };
+            let excluded_tools: &[String] = per_turn_excluded_tools.as_slice();
             let tool_loop = Box::pin(run_tool_call_loop(ToolLoop {
                 exec: ResolvedAgentExecution::resolve(
                     ResolvedModelAccess {

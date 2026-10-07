@@ -63,3 +63,20 @@ Validation:
   wraps body in `scope_cron_origin(Some(origin))`; scheduler/CLI paths
   have no scope → `None`.
 - Declarative sync jobs: `origin = None` (config-owned, not chat-created).
+
+## Slice 2 — scoped tool permissions (uncommitted)
+
+- `zeroclaw-config/src/schema.rs`: `ChannelScopeRule{match_guilds,
+  match_channels, match_users, allow_tools, deny_tools}` + `matches()` /
+  `excluded_for_turn()` (deny-union, allow-intersection, deny wins).
+  `scope_rules: Vec<ChannelScopeRule>` on `TelegramConfig` + `DiscordConfig`
+  only. Rules narrow the risk-profile policy, never widen.
+- `zeroclaw-runtime/src/tools/scoped.rs`: read-only `tool_names()`
+  accessor on the sealed registry (engine change: exposes existing state,
+  no behavior change, seal holds).
+- `zeroclaw-channels/src/orchestrator/mod.rs`: `scope_rules_for_message()`
+  (live config read, no snapshot) + `scoped_excluded_tools_for_turn()`,
+  the single source for both the prompt path and the tool-loop path
+  (incl. model-switch refresh). `cli`/`Full` bypass preserved.
+- Skills surfacing inherits automatically (same `excluded_tools` predicate
+  drives `refreshed_skills_system_prompt` + slash-spec filtering).
